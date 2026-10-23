@@ -1,0 +1,53 @@
+# Builds and tests every push: unit tests, then the speech pipeline with the
+# real models and the synthetic test voices (models cached between runs).
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Type check the UI
+        run: npm run check
+
+      - name: Build the UI
+        run: npm run build
+
+      - name: Unit tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Cache the speech models
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\io.github.saibot-strg.scripta\Models
+          key: models-${{ hashFiles('src-tauri/src/models.rs') }}
+
+      - name: Download the models
+        working-directory: src-tauri
+        run: cargo run --release --example models
+
+      - name: Speech pipeline tests
+        working-directory: src-tauri
+        run: cargo test --release --test end_to_end -- --test-threads=1 --nocapture

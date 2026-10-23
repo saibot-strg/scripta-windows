@@ -1,0 +1,12 @@
+# Dependencies and build output (recreated by npm ci / cargo build)
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+out/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

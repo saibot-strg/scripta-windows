@@ -1,0 +1,72 @@
+[package]
+name = "scripta"
+version = "0.1.0"
+description = "Local transcription for meetings and voice notes"
+authors = ["saibot-strg"]
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "scripta_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = ["tray-icon", "protocol-asset", "image-png"] }
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2.7"
+tauri-plugin-clipboard-manager = "2.5"
+tauri-plugin-single-instance = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+hound = "3.5"
+whatlang = "0.18"
+unicode-normalization = "0.1"
+reqwest = { version = "0.12", features = ["blocking"] }
+sherpa-onnx = "1.13.8"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.26"
+windows-version = "0.1"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Power",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_System_SystemInformation",
+    "Win32_Globalization",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

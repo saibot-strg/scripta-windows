@@ -1,0 +1,84 @@
+# Builds Scripta for Windows and publishes the installer.
+#
+# - Push a version tag (git tag v0.1.0 && git push origin v0.1.0) to create a
+#   GitHub release with the installer (Scripta_<version>_x64-setup.exe) and
+#   its SHA-256 checksum. The tag must match the version in
+#   src-tauri/tauri.conf.json.
+# - Run it manually (Actions → Release → Run workflow) to build a test
+#   installer without publishing anything; it is attached to the run.
+#
+# Builds are not code-signed yet: SmartScreen warns ("More info → Run
+# anyway"), and PCs with Smart App Control turned on block the installer.
+# See docs/DISTRIBUTION.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check that the tag matches the app version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match version $version" }
+          "VERSION=$version" | Out-File -Append $env:GITHUB_ENV
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Unit tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Build installer
+        run: npx tauri build --target x86_64-pc-windows-msvc
+
+      - name: Collect installer and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe out/
+          Get-ChildItem out/*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
+          }
+
+      - name: Upload installer to this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scripta-Windows
+          path: out/
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "${{ github.ref_name }}" (Get-ChildItem out/*) `
+            --title "Scripta for Windows $env:VERSION" `
+            --notes-file .github/release-notes.md --generate-notes `
+            --verify-tag

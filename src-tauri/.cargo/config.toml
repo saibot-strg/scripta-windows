@@ -1,0 +1,9 @@
+# sherpa-onnx ships its Windows libraries built with the static C runtime
+# (/MT); the app has to use it as well. The explicit target keeps the flag
+# away from build scripts and proc macros (they must stay dynamic), so pass
+# `--target x86_64-pc-windows-msvc` to `tauri build` too.
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
