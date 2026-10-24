@@ -5,7 +5,7 @@
 `.github/workflows/release.yml` builds an NSIS installer on `windows-latest` for every `v*` tag and attaches it
 (with a SHA-256 checksum) to a GitHub release. The installer:
 
-- installs per user (`%LOCALAPPDATA%\Programs\Scripta`), no administrator rights,
+- installs per user (`%LOCALAPPDATA%\Scripta`), no administrator rights,
 - adds a Start menu entry and an uninstaller,
 - downloads the WebView2 runtime only if it is missing (Windows 11 ships it).
 
@@ -19,8 +19,9 @@ Nothing else needs to be installed or started by hand; the app downloads its spe
 | Smart App Control (Windows 11 PCs that were set up fresh, unmanaged) | the installer and the app are blocked, no way to run them | only code signing (or turning Smart App Control off, which can't be undone) |
 | Company policies (WDAC/AppLocker, Intune) | depends on IT | IT allows the app by publisher or hash |
 
-Smart App Control was found on the development PC on 2026-10-23: from that moment, every freshly built
-unsigned executable was blocked (Code Integrity events 3033/3077).
+Smart App Control was found on the development PC on 2026-10-23: since then freshly built unsigned
+executables (the app, tools, tests, once the installer) are blocked at random, per build (Code Integrity
+events 3033/3077), and a self-built unsigned DLL every time.
 
 ## Recommendation for the office rollout
 

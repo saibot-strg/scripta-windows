@@ -1,4 +1,8 @@
 //! Commands the UI calls. Errors come back as text for the alert.
+//!
+//! Tauri runs synchronous commands on the window's main thread, so one that
+//! reads the library or waits for a lock freezes the window meanwhile; all of
+//! them are marked `async` to run on Tauri's thread pool instead.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,7 +48,7 @@ pub struct Bootstrap {
     pub speakers_download_size: u64,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn bootstrap(app: AppHandle, state: State<AppState>, language: String) -> Bootstrap {
     Language::set_current(if language.starts_with("de") { Language::German } else { Language::English });
     let settings = state.settings();
@@ -63,7 +67,7 @@ pub fn bootstrap(app: AppHandle, state: State<AppState>, language: String) -> Bo
 
 // MARK: - Library
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_recordings(state: State<AppState>) -> Reply<Vec<RecordingSummary>> {
     let library = state.library.lock().unwrap();
     let mut summaries = library.summaries().map_err(text)?;
@@ -82,12 +86,12 @@ pub fn list_recordings(state: State<AppState>) -> Reply<Vec<RecordingSummary>> {
     Ok(summaries)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_folders(state: State<AppState>) -> Reply<Vec<FolderInfo>> {
     state.library.lock().unwrap().folders().map_err(text)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search(state: State<AppState>, query: String) -> Reply<Vec<String>> {
     state.library.lock().unwrap().search(&query).map_err(text)
 }
@@ -113,7 +117,7 @@ fn playback_path(state: &AppState, id: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_recording(state: State<AppState>, id: String) -> Reply<Option<RecordingDetail>> {
     let audio_path = playback_path(&state, &id);
     if let Some(path) = &audio_path {
@@ -141,14 +145,14 @@ pub fn get_recording(state: State<AppState>, id: String) -> Reply<Option<Recordi
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_recording(state: State<AppState>, id: String, title: String) -> Reply<()> {
     state.library.lock().unwrap().rename(&id, &title).map_err(text)?;
     state.notify_library(Some(&id));
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_recording(state: State<AppState>, id: String) -> Reply<()> {
     state.cancel(&id);
     let root = {
@@ -166,53 +170,53 @@ pub fn delete_recording(state: State<AppState>, id: String) -> Reply<()> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_to_folder(state: State<AppState>, ids: Vec<String>, folder_id: Option<String>) -> Reply<()> {
     state.library.lock().unwrap().move_to_folder(&ids, folder_id.as_deref()).map_err(text)?;
     state.notify_library(None);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_folder(state: State<AppState>, name: String) -> Reply<FolderInfo> {
     let folder = state.library.lock().unwrap().create_folder(&name).map_err(text)?;
     state.notify_library(None);
     Ok(folder)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_folder(state: State<AppState>, id: String, name: String) -> Reply<()> {
     state.library.lock().unwrap().rename_folder(&id, &name).map_err(text)?;
     state.notify_library(None);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_folder(state: State<AppState>, id: String) -> Reply<()> {
     state.library.lock().unwrap().delete_folder(&id).map_err(text)?;
     state.notify_library(None);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn recording_file(state: State<AppState>, id: String) -> Option<String> {
     playback_path(&state, &id).map(|p| p.to_string_lossy().into_owned())
 }
 
 // MARK: - Transcription
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn transcribe(state: State<AppState>, id: String, speaker_count: Option<usize>) {
     state.enqueue(&id, speaker_count);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_transcription(state: State<AppState>, id: String) {
     state.cancel(&id);
 }
 
 /// Queues every recording without a transcript (batch transcription).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn transcribe_all_pending(state: State<AppState>) -> Reply<usize> {
     let summaries = list_recordings(state.clone())?;
     let mut count = 0;
@@ -225,7 +229,7 @@ pub fn transcribe_all_pending(state: State<AppState>) -> Reply<usize> {
     Ok(count)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn service_snapshot(state: State<AppState>) -> ServiceSnapshot {
     state.service.snapshot()
 }
@@ -238,12 +242,12 @@ fn model_kind(kind: &str) -> ModelKind {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn prepare_model(state: State<AppState>, kind: String) {
     state.service.prepare(model_kind(&kind));
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_model(state: State<AppState>, kind: String) {
     state.service.delete_model(model_kind(&kind));
 }
@@ -253,23 +257,33 @@ pub fn delete_model(state: State<AppState>, kind: String) {
 pub struct ModelSizes {
     pub speech: Option<u64>,
     pub speakers: Option<u64>,
+    /// Download size of the speech model for the chosen device.
+    pub speech_download: u64,
 }
 
-#[tauri::command]
-pub fn model_sizes() -> ModelSizes {
-    ModelSizes { speech: ModelKind::Speech.installed_size(), speakers: ModelKind::Speakers.installed_size() }
+#[tauri::command(async)]
+pub fn model_sizes(state: State<AppState>) -> ModelSizes {
+    let settings = state.settings();
+    let speech = ModelKind::Speech.on(crate::gpu::Device::choose(settings.uses_gpu, &settings.gpu_name));
+    ModelSizes { speech: speech.installed_size(), speakers: ModelKind::Speakers.installed_size(), speech_download: speech.size() }
+}
+
+/// The graphics cards transcription can run on.
+#[tauri::command(async)]
+pub fn graphics_cards() -> Vec<crate::gpu::GraphicsCard> {
+    crate::gpu::cards()
 }
 
 // MARK: - Editing
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn edit_segment(state: State<AppState>, id: String, text_value: String) -> Reply<()> {
     state.library.lock().unwrap().edit_segment(&id, &text_value).map_err(text)?;
     state.notify_library(None);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_segment(state: State<AppState>, id: String) -> Reply<()> {
     state.library.lock().unwrap().restore_segment(&id).map_err(text)?;
     state.notify_library(None);
@@ -289,80 +303,80 @@ fn with_speakers<T>(state: &AppState, action: impl FnOnce(&mut Speakers) -> anyh
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_speaker(state: State<AppState>, id: String, name: String, remember: bool) -> Reply<()> {
     with_speakers(&state, |s| s.rename(&id, &name, remember))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn assign_names(state: State<AppState>, transcript_id: String, assignments: Vec<NameAssignment>) -> Reply<()> {
     with_speakers(&state, |s| s.assign_names(&transcript_id, &assignments))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn confirm_suggestion(state: State<AppState>, id: String) -> Reply<()> {
     with_speakers(&state, |s| s.confirm_suggestion(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_speaker(state: State<AppState>, id: String, target_id: String) -> Reply<()> {
     with_speakers(&state, |s| s.merge(&id, &target_id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_segment(state: State<AppState>, segment_id: String, speaker_id: String) -> Reply<()> {
     with_speakers(&state, |s| s.move_segment(&segment_id, &speaker_id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_segment_to_new_speaker(state: State<AppState>, segment_id: String, name: Option<String>) -> Reply<()> {
     with_speakers(&state, |s| s.move_to_new_speaker(&segment_id, name.as_deref()))
 }
 
 // MARK: - People
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_people(state: State<AppState>) -> Reply<Vec<PersonSummary>> {
     state.voices.lock().unwrap().people().map_err(text)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn has_voice_data(state: State<AppState>) -> bool {
     state.voices.lock().unwrap().has_data().unwrap_or(false)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_person(state: State<AppState>, id: String, name: String) -> Reply<()> {
     with_speakers(&state, |s| s.rename_person(&id, &name))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_person(state: State<AppState>, id: String) -> Reply<()> {
     with_speakers(&state, |s| s.voices.delete_person(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_all_voices(state: State<AppState>) -> Reply<()> {
     with_speakers(&state, |s| s.voices.delete_all())
 }
 
 // MARK: - Export
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_transcript(state: State<AppState>, id: String, format: ExportFormat, path: String) -> Reply<()> {
     let document = state.library.lock().unwrap().export_document(&id).map_err(text)?.ok_or("no transcript")?;
     std::fs::write(&path, export::render(&document, format)).map_err(text)?;
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn transcript_text(state: State<AppState>, id: String, include_header: bool) -> Reply<String> {
     let document = state.library.lock().unwrap().export_document(&id).map_err(text)?.ok_or("no transcript")?;
     Ok(export::plain_text(&document, include_header))
 }
 
 /// A file name for the export dialog.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_file_name(state: State<AppState>, id: String) -> String {
     let title = state.library.lock().unwrap().recording(&id).ok().flatten().map(|r| r.title).unwrap_or_default();
     format::file_name(&title)
@@ -370,14 +384,14 @@ pub fn export_file_name(state: State<AppState>, id: String) -> String {
 
 // MARK: - Import
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_files(app: AppHandle, paths: Vec<String>, folder_id: Option<String>) {
     if !paths.is_empty() {
         importer::import(&app, paths, folder_id);
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_extensions() -> Vec<String> {
     importer::EXTENSIONS.iter().map(|e| e.to_string()).collect()
 }
@@ -403,17 +417,17 @@ pub async fn start_meeting(app: AppHandle, app_exe: Option<String>) -> Result<()
         .unwrap_or_else(|e| Err(Notice { title: e.to_string(), message: None, action: None }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_recording(app: AppHandle) {
     recorder::stop_recording(&app);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn toggle_pause(app: AppHandle) {
     recorder::toggle_pause(&app);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn recorder_status(state: State<AppState>) -> RecorderStatus {
     state.recorder.lock().unwrap().status()
 }
@@ -446,7 +460,7 @@ pub async fn list_meeting_apps() -> Vec<MeetingApp> {
 }
 
 /// Stops a running recording, waits until all recordings are saved, then quits.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn quit_after_saving(app: AppHandle) {
     std::thread::spawn(move || {
         if let Some(saving) = recorder::stop_recording(&app) {
@@ -461,12 +475,12 @@ pub fn quit_after_saving(app: AppHandle) {
 
 // MARK: - Settings
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_settings(state: State<AppState>) -> Settings {
     state.settings()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_settings(app: AppHandle, state: State<AppState>, patch: serde_json::Value) -> Reply<Settings> {
     let settings = state.update_settings(&patch).map_err(text)?;
     if patch.get("showsTrayIcon").is_some() {
@@ -475,11 +489,15 @@ pub fn update_settings(app: AppHandle, state: State<AppState>, patch: serde_json
     if patch.get("separatesSpeakers").and_then(|v| v.as_bool()) == Some(true) && !ModelKind::Speakers.is_installed() {
         state.service.prepare(ModelKind::Speakers);
     }
+    // The graphics card needs its own speech model: download and load it now.
+    if (patch.get("usesGpu").is_some() || patch.get("gpuName").is_some()) && settings.welcome_done {
+        state.service.prepare(ModelKind::Speech);
+    }
     Ok(settings)
 }
 
 /// Chooses the folder for new recordings (None = the default).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_storage_root(state: State<AppState>, path: Option<String>) -> Reply<String> {
     if state.recorder.lock().unwrap().is_active() {
         return Err("recording".into());
@@ -492,7 +510,7 @@ pub fn set_storage_root(state: State<AppState>, path: Option<String>) -> Reply<S
     Ok(state.current_storage().root.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn current_storage_root(state: State<AppState>) -> String {
     let root = state.current_storage().root;
     let _ = std::fs::create_dir_all(&root);
@@ -503,24 +521,24 @@ fn open_with_shell(target: &str) {
     let _ = std::process::Command::new("explorer.exe").arg(target).spawn();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_privacy_settings() {
     open_with_shell("ms-settings:privacy-microphone");
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_sound_settings() {
     open_with_shell("ms-settings:sound");
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_storage_folder(state: State<AppState>) {
     let root = state.current_storage().root;
     let _ = std::fs::create_dir_all(&root);
     open_with_shell(&root.to_string_lossy());
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_logs_folder() {
     let dir = crate::paths::logs_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -532,7 +550,7 @@ pub async fn check_updates(app: AppHandle) -> Result<Option<UpdateInfo>, String>
     tauri::async_runtime::spawn_blocking(move || updates::check_now(&app)).await.map_err(text)?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn skip_update(state: State<AppState>, version: String) {
     state.modify_settings(|s| s.skipped_update_version = Some(version));
 }

@@ -62,6 +62,7 @@ impl Capture {
             _ => "capture-system",
         };
         let thread = std::thread::Builder::new().name(name.into()).spawn(move || {
+            crate::priority::raise_current_thread();
             let result = run(source, &thread_stop, on_audio, |ready| {
                 let _ = ready_tx.send(ready);
             });

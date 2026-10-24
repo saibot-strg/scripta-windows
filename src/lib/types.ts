@@ -116,6 +116,9 @@ export interface Settings {
   separatesSpeakers: boolean;
   separatesRoomSpeakers: boolean;
   recognizesVoices: boolean;
+  usesGpu: boolean;
+  gpuName: string;
+  gpuFailed: boolean;
   checksForUpdates: boolean;
   lastUpdateCheck: string | null;
   latestReleaseVersion: string | null;
@@ -124,6 +127,12 @@ export interface Settings {
   storageRoot: string | null;
   showsTrayIcon: boolean;
   welcomeDone: boolean;
+}
+
+export interface GraphicsCard {
+  name: string;
+  /** Dedicated video memory in bytes. */
+  memory: number;
 }
 
 export interface UpdateInfo {

@@ -39,3 +39,8 @@ pub fn voices_file() -> PathBuf {
 pub fn settings_file() -> PathBuf {
     data_dir().join("settings.json")
 }
+
+/// Exists while models load or run on the graphics card (see `gpu::Guard`).
+pub fn gpu_marker_file() -> PathBuf {
+    data_dir().join("gpu-running")
+}

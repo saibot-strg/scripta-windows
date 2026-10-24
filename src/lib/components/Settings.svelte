@@ -7,7 +7,7 @@
   import type { IconName } from '../icons';
   import { menu } from '../menu.svelte';
   import { app } from '../store.svelte';
-  import type { MeetingApp, Microphones, ModelState, Person, Settings } from '../types';
+  import type { GraphicsCard, MeetingApp, Microphones, ModelState, Person, Settings } from '../types';
   import Dialog from './Dialog.svelte';
   import Icon from './Icon.svelte';
 
@@ -26,18 +26,20 @@
   let microphones = $state<Microphones>({ devices: [], defaultId: null });
   let apps = $state<MeetingApp[]>([]);
   let storageRoot = $state('');
-  let sizes = $state<{ speech: number | null; speakers: number | null }>({ speech: null, speakers: null });
+  let sizes = $state<{ speech: number | null; speakers: number | null; speechDownload: number }>({ speech: null, speakers: null, speechDownload: 0 });
   let hasVoiceData = $state(false);
+  let cards = $state<GraphicsCard[]>([]);
   let checking = $state(false);
   let checkResult = $state<string | null>(null);
 
   async function refresh() {
-    [microphones, apps, storageRoot, sizes, hasVoiceData] = await Promise.all([
+    [microphones, apps, storageRoot, sizes, hasVoiceData, cards] = await Promise.all([
       api.listMicrophones().catch(() => ({ devices: [], defaultId: null })),
       api.listMeetingApps().catch(() => []),
       api.currentStorageRoot(),
       api.modelSizes(),
       api.hasVoiceData(),
+      api.graphicsCards().catch(() => []),
     ]);
   }
   void refresh();
@@ -51,6 +53,13 @@
   });
 
   const update = (patch: Partial<Settings>) => app.updateSettings(patch);
+
+  // Without a choice, the card with the most memory (the discrete one).
+  const largestCard = $derived(cards.reduce<GraphicsCard | null>((best, c) => (!best || c.memory > best.memory ? c : best), null));
+  const card = $derived(cards.find((c) => c.name === settings.gpuName) ?? largestCard);
+  // Graphics memory is sold in binary units: 24 GiB reads "24 GB".
+  const cardLabel = (c: GraphicsCard) => `${c.name} · ${Math.round(c.memory / 2 ** 30)} GB`;
+  const onGpu = $derived(settings.usesGpu && !!card);
 
   function modelStatus(state: ModelState): { text: string; tone: string } {
     switch (state.state) {
@@ -299,13 +308,16 @@
         </div>
         <div class="group">
           <div class="setting">
-            <div class="labels"><div>{t('Spracherkennung')}</div><div class="caption secondary">Parakeet TDT 0.6B v3 (int8)</div></div>
+            <div class="labels">
+              <div>{t('Spracherkennung')}</div>
+              <div class="caption secondary">Parakeet TDT 0.6B v3 ({onGpu ? t('volle Genauigkeit') : 'int8'})</div>
+            </div>
             <span class="status {speech.tone}">{speech.text}</span>
           </div>
           <div class="setting">
             <div class="labels">
               <div>{t('Speicherbedarf')}</div>
-              <div class="caption secondary">{sizes.speech ? bytes(sizes.speech) : t('Download ca. {size}', { size: bytes(app.speechDownloadSize) })}</div>
+              <div class="caption secondary">{sizes.speech ? bytes(sizes.speech) : t('Download ca. {size}', { size: bytes(sizes.speechDownload || app.speechDownloadSize) })}</div>
             </div>
             <div class="buttons">
               {#if sizes.speech}
@@ -315,7 +327,7 @@
                   onclick={async () => {
                     const confirmed = await dialogs.confirm({
                       title: t('Modell löschen?'),
-                      message: t('Für die nächste Transkription wird es erneut geladen (ca. {size}).', { size: bytes(app.speechDownloadSize) }),
+                      message: t('Für die nächste Transkription wird es erneut geladen (ca. {size}).', { size: bytes(sizes.speechDownload || app.speechDownloadSize) }),
                       confirm: t('Löschen'),
                       danger: true,
                     });
@@ -328,12 +340,43 @@
             </div>
           </div>
           <p class="footer caption secondary">
-            {t('Läuft auf dem Prozessor dieses PCs. Das Modell wird einmalig von Hugging Face geladen; danach arbeitet Scripta komplett offline. Modell: NVIDIA Parakeet TDT 0.6B v3 (CC BY 4.0) in der ONNX-Fassung von sherpa-onnx.')}
+            {onGpu ? t('Läuft auf der Grafikkarte dieses PCs.') : t('Läuft auf dem Prozessor dieses PCs.')}
+            {t('Das Modell wird einmalig von Hugging Face geladen; danach arbeitet Scripta komplett offline. Modell: NVIDIA Parakeet TDT 0.6B v3 (CC BY 4.0) in der ONNX-Fassung von sherpa-onnx.')}
+          </p>
+        </div>
+        <div class="group">
+          {@render toggle(
+            t('Grafikkarte verwenden'),
+            card ? cardLabel(card) : t('Keine geeignete Grafikkarte gefunden'),
+            settings.usesGpu && !!card,
+            (v) => update({ usesGpu: v, gpuFailed: false }),
+            !card,
+          )}
+          {#if cards.length > 1 && largestCard}
+            <div class="setting" class:disabled={!settings.usesGpu}>
+              <div class="labels"><div>{t('Grafikkarte')}</div></div>
+              <select
+                class="select wide"
+                disabled={!settings.usesGpu}
+                value={cards.some((c) => c.name === settings.gpuName) ? settings.gpuName : ''}
+                onchange={(event) => update({ gpuName: event.currentTarget.value })}
+              >
+                <option value="">{t('Automatisch')}</option>
+                {#each cards as c}
+                  <option value={c.name}>{cardLabel(c)}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+          <p class="footer caption" class:secondary={!settings.gpuFailed} class:warning={settings.gpuFailed}>
+            {settings.gpuFailed
+              ? t('Scripta wurde bei der Arbeit auf der Grafikkarte beendet und rechnet seitdem wieder auf dem Prozessor. Du kannst es erneut versuchen; oft hilft ein aktueller Grafiktreiber.')
+              : t('Die Spracherkennung läuft dann auf der Grafikkarte, mit einem genaueren Modell (einmalig ca. 2,5 GB) und meist um ein Vielfaches schneller. Funktioniert mit Grafikkarten von AMD, NVIDIA und Intel. Die Sprechertrennung bleibt auf dem Prozessor.')}
           </p>
         </div>
         <div class="group">
           {@render toggle(t('Sprecher unterscheiden'), null, settings.separatesSpeakers, (v) => update({ separatesSpeakers: v }))}
-          {@render toggle(t('Mehrere Personen am Mikrofon'), t('Für Meetings, in denen weitere Personen mit dir am PC sitzen. Ist im Meeting niemand online zu hören, geschieht das automatisch.'), settings.separatesRoomSpeakers, (v) => update({ separatesRoomSpeakers: v }), !settings.separatesSpeakers)}
+          {@render toggle(t('Mehrere Personen am Mikrofon'), t('Nur einschalten, wenn bei Meetings weitere Personen mit dir am PC sitzen: Dann werden auch die Stimmen an deinem Mikrofon getrennt, und das Transkribieren dauert länger. Ist im Meeting niemand online zu hören, geschieht das automatisch.'), settings.separatesRoomSpeakers, (v) => update({ separatesRoomSpeakers: v }), !settings.separatesSpeakers)}
           <div class="setting" class:disabled={!settings.separatesSpeakers}>
             <div class="labels">
               <div>{t('Sprechertrennung')}</div>
@@ -565,6 +608,9 @@
   .status.bad {
     color: var(--red);
     max-width: 240px;
+  }
+  .footer.warning {
+    color: var(--red);
   }
   .about {
     display: flex;

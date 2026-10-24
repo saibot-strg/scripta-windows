@@ -30,6 +30,14 @@ pub struct Settings {
     /// Remember voices and recognize people in later recordings (opt-in:
     /// voice profiles are biometric data).
     pub recognizes_voices: bool,
+    /// Run speech recognition on the graphics card (DirectML) instead of the
+    /// processor.
+    pub uses_gpu: bool,
+    /// The graphics card by name ("" = the one with the most memory).
+    pub gpu_name: String,
+    /// Scripta ended during work on the graphics card, so it was turned off
+    /// again (shown in the settings until the user turns it on again).
+    pub gpu_failed: bool,
     /// Look for a new release on GitHub once a day.
     pub checks_for_updates: bool,
     pub last_update_check: Option<String>,
@@ -59,6 +67,9 @@ impl Default for Settings {
             separates_speakers: true,
             separates_room_speakers: false,
             recognizes_voices: false,
+            uses_gpu: false,
+            gpu_name: String::new(),
+            gpu_failed: false,
             checks_for_updates: true,
             last_update_check: None,
             latest_release_version: None,

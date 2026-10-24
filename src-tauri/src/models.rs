@@ -9,13 +9,16 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
+use crate::gpu::Device;
 use crate::paths;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelKind {
-    /// Parakeet (speech to text) plus the voice activity detector.
+    /// Parakeet (speech to text, int8) plus the voice activity detector.
     Speech,
+    /// Parakeet in full precision for the graphics card (see `on`).
+    SpeechFull,
     /// Speaker segmentation and voice embeddings.
     Speakers,
 }
@@ -55,6 +58,20 @@ const SPEECH_FILES: &[ModelFile] = &[
     ModelFile { repo: "csukuangfj/vad", remote: "silero_vad.onnx", local: "silero_vad.onnx", size: 1_807_522 },
 ];
 
+const SPEECH_FULL_FILES: &[ModelFile] = &[
+    ModelFile { repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3", remote: "encoder.onnx", local: "encoder.onnx", size: 41_766_257 },
+    ModelFile {
+        repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3",
+        remote: "encoder.weights",
+        local: "encoder.weights",
+        size: 2_435_420_160,
+    },
+    ModelFile { repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3", remote: "decoder.onnx", local: "decoder.onnx", size: 47_233_743 },
+    ModelFile { repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3", remote: "joiner.onnx", local: "joiner.onnx", size: 25_286_330 },
+    ModelFile { repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3", remote: "tokens.txt", local: "tokens.txt", size: 93_939 },
+    ModelFile { repo: "csukuangfj/vad", remote: "silero_vad.onnx", local: "silero_vad.onnx", size: 1_807_522 },
+];
+
 const SPEAKER_FILES: &[ModelFile] = &[
     ModelFile {
         repo: "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0",
@@ -77,9 +94,22 @@ const SPEAKER_FILES: &[ModelFile] = &[
 pub const ENGINE_IDENTIFIER: &str = "parakeet-tdt-0.6b-v3";
 
 impl ModelKind {
+    /// The model behind a kind on a device. On a graphics card speech uses
+    /// Parakeet in full precision: with DirectML the int8 model was slower
+    /// than the processor, and it left out whole sentences the full model
+    /// recognized (433 against 491 words in 10 minutes of a Teams meeting).
+    /// Speaker separation always runs on the processor.
+    pub fn on(self, device: Device) -> ModelKind {
+        match (self, device) {
+            (Self::Speech, Device::Gpu(_)) => Self::SpeechFull,
+            _ => self,
+        }
+    }
+
     fn files(self) -> &'static [ModelFile] {
         match self {
             Self::Speech => SPEECH_FILES,
+            Self::SpeechFull => SPEECH_FULL_FILES,
             Self::Speakers => SPEAKER_FILES,
         }
     }
@@ -87,6 +117,7 @@ impl ModelKind {
     fn folder(self) -> &'static str {
         match self {
             Self::Speech => "parakeet-tdt-0.6b-v3-int8",
+            Self::SpeechFull => "parakeet-tdt-0.6b-v3",
             Self::Speakers => "speaker-diarization",
         }
     }

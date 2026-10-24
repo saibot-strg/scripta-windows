@@ -1,9 +1,13 @@
-# sherpa-onnx ships its Windows libraries built with the static C runtime
-# (/MT); the app has to use it as well. The explicit target keeps the flag
-# away from build scripts and proc macros (they must stay dynamic), so pass
-# `--target x86_64-pc-windows-msvc` to `tauri build` too.
+# The app links its C runtime statically (/MT), like the sherpa-onnx DLLs, so
+# it needs no Visual C++ redistributable of its own. The explicit target keeps
+# the flag away from build scripts and proc macros (they must stay dynamic),
+# so pass `--target x86_64-pc-windows-msvc` to `tauri build` too.
 [build]
 target = "x86_64-pc-windows-msvc"
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# sherpa-onnx (static) with DirectML, built by scripts/build-sherpa-directml.ps1.
+[env]
+SHERPA_ONNX_LIB_DIR = { value = "native/sherpa-onnx", relative = true }

@@ -59,7 +59,9 @@ don't turn Smart App Control off yourself (it can't be turned on again); ask who
 **Meeting** you can record one app only, e.g. *Microsoft Teams*. Wear a headset for the cleanest result.
 
 **Transcribe:** select a recording and click **Transcribe** (*Transkribieren*). It runs in the background;
-a one-hour meeting takes a few minutes on a fast PC and longer on a laptop.
+a one-hour meeting takes a few minutes on a fast PC and longer on a laptop. With a graphics card (AMD, NVIDIA
+or Intel), turn on Settings → Transcription → **Use graphics card** (*Grafikkarte verwenden*): speech
+recognition then runs several times faster with a more accurate model, which is downloaded once (2.5 GB).
 
 **Name the speakers:** above the transcript, click **Assign…** (*Zuordnen …*), listen to each voice and type
 a name. If you turn on *Recognize voices* (*Stimmen wiedererkennen*), Scripta suggests the names in later
@@ -119,15 +121,18 @@ Ctrl+Shift+C copies it.
 ## For developers
 
 Prerequisites: Rust (stable, MSVC toolchain), Visual Studio 2022 Build Tools with "Desktop development with
-C++", Node.js 22 or later.
+C++", Node.js 22 or later, Git.
 
 ```powershell
+scripts\build-sherpa-directml.ps1                  # once (~20 min): sherpa-onnx with DirectML into src-tauri\native
 npm ci
 npx tauri build --target x86_64-pc-windows-msvc   # installer in src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis
 ```
 
-The explicit target is needed: sherpa-onnx ships its libraries with the static C runtime, and
-`src-tauri/.cargo/config.toml` applies `+crt-static` to the app only this way.
+sherpa-onnx's prebuilt Windows libraries can't use AMD or Intel graphics cards, so the script builds it from
+source with ONNX Runtime's DirectML; the installer ships `onnxruntime.dll`, `DirectML.dll` and the Visual C++
+runtime next to `scripta.exe`. The explicit target is needed: the app and sherpa-onnx use the static C runtime,
+and `src-tauri/.cargo/config.toml` applies `+crt-static` to the app only this way.
 
 ```powershell
 cd src-tauri
@@ -135,6 +140,9 @@ cargo test --lib                                              # unit tests, no m
 cargo run --release --example models                          # download the models once
 cargo test --release --test end_to_end -- --test-threads=1    # speech pipeline with synthetic voices
 ```
+
+`SCRIPTA_GPU=1` runs the end-to-end tests and the tools in `src-tauri/examples` on the graphics card
+(`benchmark`, and `calibrate` for speaker separation on a real recording).
 
 - `npm run dev` on any OS opens the UI in a browser at <http://localhost:1420> with sample data
   (`src/mock.ts`), e.g. `?select=0`, `?theme=dark`, `?recording=meeting`, `?settings=people`.
@@ -152,5 +160,7 @@ cargo test --release --test end_to_end -- --test-threads=1    # speech pipeline 
 - [NVIDIA TitaNet small](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/titanet_small) (CC BY 4.0)
 - [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) (MIT)
 - [Silero VAD](https://github.com/snakers4/silero-vad) (MIT)
-- [ONNX Runtime](https://onnxruntime.ai) (MIT), [Tauri](https://tauri.app) (MIT/Apache 2.0),
+- [ONNX Runtime](https://onnxruntime.ai) (MIT) with
+  [DirectML](https://github.com/microsoft/DirectML) (Microsoft Software License Terms, redistributable),
+  Microsoft Visual C++ runtime (redistributable), [Tauri](https://tauri.app) (MIT/Apache 2.0),
   [Svelte](https://svelte.dev) (MIT), [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT)

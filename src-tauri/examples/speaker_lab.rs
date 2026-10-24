@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use scripta_lib::audio::{resample::resample, wav, MODEL_RATE};
-use scripta_lib::engine::SpeakerEngine;
+use scripta_lib::engine::{SpeakerEngine, LONG_WINDOW_SHIFT};
+use scripta_lib::gpu::Device;
 use scripta_lib::voices::cosine;
 
 struct Clip {
@@ -138,7 +139,7 @@ fn main() -> anyhow::Result<()> {
     for model in &args[1..] {
         let name = Path::new(model).file_name().unwrap().to_string_lossy();
         println!("\n=== {name}");
-        let engine = SpeakerEngine::load_with(Path::new(model), 0.5)?;
+        let engine = SpeakerEngine::load_with(Path::new(model), 0.5, LONG_WINDOW_SHIFT, Device::Cpu)?;
         let mut clean: BTreeMap<String, Vec<Vec<f32>>> = BTreeMap::new();
         for clip in &first {
             clean.entry(clip.speaker.clone()).or_default().push(engine.embedding(&clip.samples).unwrap());
@@ -169,7 +170,7 @@ fn main() -> anyhow::Result<()> {
             println!("profile {a} (clean) vs call -> {}", row.join("  "));
         }
         if std::env::var("VERBOSE").is_ok() {
-            let engine = SpeakerEngine::load_with(Path::new(model), 0.5)?;
+            let engine = SpeakerEngine::load_with(Path::new(model), 0.5, LONG_WINDOW_SHIFT, Device::Cpu)?;
             let d = engine.diarize(&dialogue_b, None)?;
             for (start, end, who) in &turns_b {
                 println!("truth {start:6.2}–{end:6.2} {who}");
@@ -179,7 +180,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         for threshold in [0.3f32, 0.4, 0.5, 0.6, 0.7] {
-            let engine = SpeakerEngine::load_with(Path::new(model), threshold)?;
+            let engine = SpeakerEngine::load_with(Path::new(model), threshold, LONG_WINDOW_SHIFT, Device::Cpu)?;
             let (count_a, accuracy_a) = turn_accuracy(&engine.diarize(&dialogue_a, None)?, &turns_a);
             let (count_b, accuracy_b) = turn_accuracy(&engine.diarize(&dialogue_b, None)?, &turns_b);
             println!("threshold {threshold:.1}: clean {count_a} speakers ({:.0} %), call {count_b} speakers ({:.0} %)", accuracy_a * 100.0, accuracy_b * 100.0);

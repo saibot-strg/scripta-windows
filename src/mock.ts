@@ -133,6 +133,9 @@ const settings: Settings = {
   separatesSpeakers: true,
   separatesRoomSpeakers: false,
   recognizesVoices: params.get('recognize') === '1',
+  usesGpu: params.get('gpu') === '1',
+  gpuName: '',
+  gpuFailed: params.get('gpu') === 'failed',
   checksForUpdates: true,
   lastUpdateCheck: null,
   latestReleaseVersion: null,
@@ -214,7 +217,14 @@ mockIPC(
       case 'import_extensions':
         return ['mp3', 'm4a', 'wav'];
       case 'model_sizes':
-        return { speech: 672_286_294, speakers: 46_250_196 };
+        return { speech: 672_286_294, speakers: 46_250_196, speechDownload: 672_286_294 };
+      case 'graphics_cards':
+        return params.get('gpu') === 'none'
+          ? []
+          : [
+              { name: 'AMD Radeon(TM) Graphics', memory: 536_870_912 },
+              { name: 'AMD Radeon RX 7900 XTX', memory: 25_753_026_560 },
+            ];
       case 'has_voice_data':
         return true;
       case 'current_storage_root':

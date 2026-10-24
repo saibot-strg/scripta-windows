@@ -5,12 +5,14 @@ pub mod commands;
 pub mod engine;
 pub mod export;
 pub mod format;
+pub mod gpu;
 pub mod importer;
 pub mod library;
 pub mod logging;
 pub mod model;
 pub mod models;
 pub mod paths;
+pub mod priority;
 pub mod recorder;
 pub mod recovery;
 pub mod service;
@@ -86,6 +88,13 @@ fn open_stores() -> (Library, VoiceStore, Option<String>) {
 fn startup(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     recovery::run(app);
+    if gpu::Guard::take_crash() && state.settings().uses_gpu {
+        tracing::warn!("the last run ended during work on the graphics card; back to the processor");
+        state.modify_settings(|s| {
+            s.uses_gpu = false;
+            s.gpu_failed = true;
+        });
+    }
     let pending = state.library.lock().unwrap().pending_jobs().unwrap_or_default();
     for id in pending {
         state.service.enqueue(&id, None);
@@ -114,6 +123,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            // Setup runs on the window's thread.
+            priority::raise_current_thread();
             let (library, voices, problem) = open_stores();
             let settings = SettingsStore::load(&paths::settings_file());
             app.manage(AppState::new(app.handle().clone(), library, voices, settings));
@@ -178,6 +189,7 @@ pub fn run() {
             commands::prepare_model,
             commands::delete_model,
             commands::model_sizes,
+            commands::graphics_cards,
             commands::edit_segment,
             commands::restore_segment,
             commands::rename_speaker,
@@ -216,6 +228,11 @@ pub fn run() {
             commands::check_updates,
             commands::skip_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Scripta");
+        .build(tauri::generate_context!())
+        .expect("error while building Scripta")
+        .run(|_, event| {
+            if let tauri::RunEvent::Exit = event {
+                gpu::Guard::clear();
+            }
+        });
 }

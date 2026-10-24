@@ -33,6 +33,7 @@ hound = "3.5"
 whatlang = "0.18"
 unicode-normalization = "0.1"
 reqwest = { version = "0.12", features = ["blocking"] }
+# Built with DirectML by scripts/build-sherpa-directml.ps1 (see .cargo/config.toml).
 sherpa-onnx = "1.13.8"
 
 [target.'cfg(windows)'.dependencies]
@@ -54,6 +55,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_System_SystemInformation",
     "Win32_Globalization",
+    "Win32_Graphics_Dxgi",
 ] }
 
 [dev-dependencies]

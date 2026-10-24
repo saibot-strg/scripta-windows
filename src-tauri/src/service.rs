@@ -3,10 +3,11 @@
 //! A port of Scripta's `TranscriptionService`.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -15,8 +16,10 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::{mf, MODEL_RATE};
 use crate::engine::{EngineError, SpeakerEngine, SpeechEngine};
+use crate::gpu::{self, Device};
 use crate::model::{TrackRole, TranscriptionStatus, WordTiming};
 use crate::models::{ModelKind, ENGINE_IDENTIFIER};
+use crate::priority;
 use crate::state::{tr, AppState};
 use crate::storage::Storage;
 use crate::transcript::{self, Diarization, DraftTranscript};
@@ -25,9 +28,21 @@ use crate::voices::LabelVoice;
 /// The loaded models take about 1 GB; free them after this idle time.
 const IDLE_UNLOAD: Duration = Duration::from_secs(300);
 
-/// Share of a track's progress taken by decoding and transcription when
-/// diarization follows.
-const TRANSCRIPTION_SHARE: f64 = 0.7;
+/// Share of a track's progress taken by reading and transcription when
+/// diarization follows (2-hour Teams track on the test PC: 50 s against 60 s
+/// with the graphics card, about 140 s against 60 s on the processor).
+fn transcription_share(device: Device) -> f64 {
+    match device {
+        Device::Gpu(_) => 0.45,
+        Device::Cpu => 0.7,
+    }
+}
+
+/// The window redraws on every progress event, and decoding alone reports
+/// each audio frame (about 340,000 for 2 hours): send one at most this often
+/// and only when the value moved visibly.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const PROGRESS_STEP: f64 = 0.005;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
@@ -64,6 +79,8 @@ struct Shared {
     queue: VecDeque<Job>,
     running: Option<String>,
     progress: f64,
+    /// When and with which value the last progress event went out.
+    reported: (Instant, f64),
     cancel: Arc<AtomicBool>,
 }
 
@@ -95,11 +112,12 @@ impl TranscriptionService {
             queue: VecDeque::new(),
             running: None,
             progress: 0.0,
+            reported: (Instant::now(), 0.0),
             cancel: Arc::new(AtomicBool::new(false)),
         }));
         let (commands, receiver) = mpsc::channel();
         let service = Self { shared: shared.clone(), commands };
-        let worker = Worker { app, shared, speech: None, speakers: None, last_used: Instant::now() };
+        let worker = Worker { app, shared, speech: None, speakers: None, device: Device::Cpu, last_used: Instant::now() };
         std::thread::Builder::new()
             .name("transcription".into())
             .spawn(move || worker.run(receiver))
@@ -171,6 +189,8 @@ struct Worker {
     shared: Arc<Mutex<Shared>>,
     speech: Option<SpeechEngine>,
     speakers: Option<SpeakerEngine>,
+    /// Where the loaded models run.
+    device: Device,
     last_used: Instant,
 }
 
@@ -190,6 +210,12 @@ struct TrackResult {
 
 impl Worker {
     fn run(mut self, receiver: mpsc::Receiver<Command>) {
+        // The settings live in the app state, managed right after the service
+        // starts; they decide which speech model the status shows.
+        while self.app.try_state::<AppState>().is_none() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.select_device();
         loop {
             let next = {
                 let mut shared = self.shared.lock().unwrap();
@@ -197,6 +223,7 @@ impl Worker {
                 if let Some((id, _)) = &job {
                     shared.running = Some(id.clone());
                     shared.progress = 0.0;
+                    shared.reported = (Instant::now(), 0.0);
                     shared.cancel = Arc::new(AtomicBool::new(false));
                 }
                 job
@@ -236,14 +263,15 @@ impl Worker {
                 self.last_used = Instant::now();
             }
             Command::Delete(kind) => {
+                let files = kind.on(self.select_device());
                 match kind {
-                    ModelKind::Speech => self.speech = None,
                     ModelKind::Speakers => self.speakers = None,
+                    _ => self.speech = None,
                 }
-                if let Err(error) = kind.delete() {
+                if let Err(error) = files.delete() {
                     tracing::error!(%error, "deleting model failed");
                 }
-                self.set_model(kind, initial_state(kind));
+                self.set_model(kind, initial_state(files));
             }
         }
     }
@@ -252,6 +280,11 @@ impl Worker {
         if self.last_used.elapsed() < IDLE_UNLOAD || (self.speech.is_none() && self.speakers.is_none()) {
             return;
         }
+        self.unload();
+        tracing::info!("models unloaded after idle time");
+    }
+
+    fn unload(&mut self) {
         self.speech = None;
         self.speakers = None;
         for kind in [ModelKind::Speech, ModelKind::Speakers] {
@@ -259,14 +292,29 @@ impl Worker {
                 self.set_model(kind, ModelState::Installed);
             }
         }
-        tracing::info!("models unloaded after idle time");
+    }
+
+    /// The device the settings ask for speech recognition; switching it
+    /// reloads the speech model (another one on the graphics card).
+    fn select_device(&mut self) -> Device {
+        let settings = self.app.state::<AppState>().settings();
+        let wanted = Device::choose(settings.uses_gpu, &settings.gpu_name);
+        if wanted != self.device {
+            tracing::info!(card = wanted.card().map(|c| c.name), "speech recognition device");
+            self.speech = None;
+            self.device = wanted;
+            if !matches!(self.model_state(ModelKind::Speech), ModelState::Downloading { .. } | ModelState::Loading) {
+                self.set_model(ModelKind::Speech, initial_state(ModelKind::Speech.on(wanted)));
+            }
+        }
+        wanted
     }
 
     fn model_state(&self, kind: ModelKind) -> ModelState {
         let shared = self.shared.lock().unwrap();
         match kind {
-            ModelKind::Speech => shared.speech.clone(),
             ModelKind::Speakers => shared.speakers.clone(),
+            _ => shared.speech.clone(),
         }
     }
 
@@ -274,8 +322,8 @@ impl Worker {
         {
             let mut shared = self.shared.lock().unwrap();
             match kind {
-                ModelKind::Speech => shared.speech = state,
                 ModelKind::Speakers => shared.speakers = state,
+                _ => shared.speech = state,
             }
         }
         self.emit_queue();
@@ -288,19 +336,24 @@ impl Worker {
 
     /// Downloads (first run) and loads a model. Safe to call repeatedly.
     fn ensure(&mut self, kind: ModelKind) -> Result<()> {
+        let device = self.select_device();
+        // On the graphics card speaker separation was slower than on the
+        // processor (5 min of a Teams meeting: 14 s against 10 s).
+        let device = if kind == ModelKind::Speakers { Device::Cpu } else { device };
         let loaded = match kind {
-            ModelKind::Speech => self.speech.is_some(),
             ModelKind::Speakers => self.speakers.is_some(),
+            _ => self.speech.is_some(),
         };
         if loaded {
             return Ok(());
         }
+        let files = kind.on(device);
         let result = (|| -> Result<()> {
-            if !kind.is_installed() {
+            if !files.is_installed() {
                 let cancel = AtomicBool::new(false);
                 let mut last = Instant::now() - Duration::from_secs(1);
                 self.set_model(kind, ModelState::Downloading { fraction: 0.0 });
-                kind.download(&cancel, |fraction| {
+                files.download(&cancel, |fraction| {
                     if last.elapsed() >= Duration::from_millis(250) {
                         last = Instant::now();
                         self.set_model(kind, ModelState::Downloading { fraction });
@@ -309,11 +362,12 @@ impl Worker {
             }
             self.set_model(kind, ModelState::Loading);
             let started = Instant::now();
+            let _guard = gpu::Guard::new(device);
             match kind {
-                ModelKind::Speech => self.speech = Some(SpeechEngine::load()?),
-                ModelKind::Speakers => self.speakers = Some(SpeakerEngine::load()?),
+                ModelKind::Speakers => self.speakers = Some(SpeakerEngine::load(device)?),
+                _ => self.speech = Some(SpeechEngine::load(device)?),
             }
-            tracing::info!(?kind, seconds = started.elapsed().as_secs_f64(), "model loaded");
+            tracing::info!(model = ?files, ?device, seconds = started.elapsed().as_secs_f64(), "model loaded");
             Ok(())
         })();
         match &result {
@@ -330,6 +384,11 @@ impl Worker {
         {
             let mut shared = self.shared.lock().unwrap();
             shared.progress = fraction;
+            let (at, value) = shared.reported;
+            if at.elapsed() < PROGRESS_INTERVAL || (fraction - value).abs() < PROGRESS_STEP {
+                return;
+            }
+            shared.reported = (Instant::now(), fraction);
         }
         let _ = self.app.emit("transcription-progress", serde_json::json!({ "id": id, "fraction": fraction }));
     }
@@ -355,6 +414,7 @@ impl Worker {
         };
 
         state.set_status(id, TranscriptionStatus::Running, None);
+        let _background = priority::Background::new();
         let settings = state.settings();
         let separates = settings.separates_speakers;
         let cancel = self.cancel_flag();
@@ -364,6 +424,8 @@ impl Worker {
             self.ensure(ModelKind::Speech).map_err(|e| anyhow!(tr("Das Spracherkennungsmodell konnte nicht geladen werden.", "The speech recognition model could not be loaded.") + " " + &e.to_string()))?;
             let mut tracks: HashMap<TrackKind, TrackResult> = HashMap::new();
             let count = inputs.len() as f64;
+            // The next track is read while this one is transcribed.
+            let mut next: Option<JoinHandle<Result<Vec<f32>>>> = None;
             for (index, (path, kind)) in inputs.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(EngineError::Cancelled.into());
@@ -372,20 +434,29 @@ impl Worker {
                     && (*kind != TrackKind::Microphone
                         || settings.separates_room_speakers
                         || tracks.get(&TrackKind::System).map(|t| t.words.len() < 20).unwrap_or(true));
-                let share = if wants_speakers { TRANSCRIPTION_SHARE } else { 1.0 };
+                let share = if wants_speakers { transcription_share(self.device) } else { 1.0 };
                 let report = |fraction: f64| (index as f64 + fraction) / count;
 
-                let samples = mf::decode_to_vec(path, MODEL_RATE, |f| self.set_progress(id, report(f * 0.1 * share)))
-                    .map_err(|e| anyhow!(tr("Die Audiodatei konnte nicht gelesen werden.", "The audio file could not be read.") + " " + &e.to_string()))?;
+                let samples = match next.take() {
+                    Some(reading) => reading.join().map_err(|_| anyhow!("reading the audio failed"))??,
+                    None => read_audio(path, &cancel, |f| self.set_progress(id, report(f * 0.1 * share)))?,
+                };
+                if let Some((path, _)) = inputs.get(index + 1) {
+                    let (path, cancel) = (path.clone(), cancel.clone());
+                    next = Some(std::thread::spawn(move || read_audio(&path, &cancel, |_| {})));
+                }
                 if samples.len() < MODEL_RATE as usize / 2 {
                     tracks.insert(*kind, TrackResult { words: Vec::new(), speakers: None });
                     continue;
                 }
                 let engine = self.speech.as_ref().ok_or_else(|| anyhow!("speech model missing"))?;
-                let words = engine.transcribe(&samples, &cancel, |f| self.set_progress(id, report((0.1 + 0.9 * f) * share)))?;
+                let words = {
+                    let _guard = gpu::Guard::new(self.device);
+                    engine.transcribe(&samples, &cancel, |f| self.set_progress(id, report((0.1 + 0.9 * f) * share)))?
+                };
                 let speakers = if wants_speakers && !words.is_empty() {
                     let count_for_track = if *kind == TrackKind::Microphone { None } else { speaker_count };
-                    self.diarize(&samples, count_for_track, &cancel)?
+                    self.diarize(&samples, count_for_track, &cancel, id, |f| report(share + (1.0 - share) * f))?
                 } else {
                     None
                 };
@@ -410,6 +481,7 @@ impl Worker {
                 }
                 tracing::info!(
                     segments = draft.segments.len(),
+                    device = ?self.device,
                     seconds = started.elapsed().as_secs_f64(),
                     "transcribed"
                 );
@@ -425,7 +497,14 @@ impl Worker {
 
     /// Diarization is a bonus: if it fails, the transcript is still stored,
     /// just without separate speakers.
-    fn diarize(&mut self, samples: &[f32], speaker_count: Option<usize>, cancel: &AtomicBool) -> Result<Option<Diarization>> {
+    fn diarize(
+        &mut self,
+        samples: &[f32],
+        speaker_count: Option<usize>,
+        cancel: &AtomicBool,
+        id: &str,
+        to_job: impl Fn(f64) -> f64,
+    ) -> Result<Option<Diarization>> {
         if self.ensure(ModelKind::Speakers).is_err() {
             return Ok(None);
         }
@@ -434,7 +513,7 @@ impl Worker {
         }
         let Some(engine) = self.speakers.as_ref() else { return Ok(None) };
         let started = Instant::now();
-        match engine.diarize(samples, speaker_count) {
+        match engine.diarize_cancellable(samples, speaker_count, cancel, |f| self.set_progress(id, to_job(f))) {
             Ok(diarization) => {
                 tracing::info!(
                     speakers = diarization.speakers().len(),
@@ -444,6 +523,7 @@ impl Worker {
                 );
                 Ok(Some(diarization))
             }
+            Err(error) if error.downcast_ref::<EngineError>().is_some() => Err(error),
             Err(error) => {
                 tracing::error!(%error, "diarization failed");
                 Ok(None)
@@ -510,4 +590,30 @@ impl Worker {
         tracing::error!(recording = id, error = message, "transcription failed");
         self.app.state::<AppState>().set_status(id, TranscriptionStatus::Failed, Some(message));
     }
+}
+
+/// A track as 16 kHz mono samples; stops early once `cancel` is set.
+fn read_audio(path: &Path, cancel: &AtomicBool, progress: impl FnMut(f64)) -> Result<Vec<f32>> {
+    let started = Instant::now();
+    let mut samples = Vec::new();
+    mf::decode_mono(
+        path,
+        MODEL_RATE,
+        |chunk| {
+            samples.extend_from_slice(chunk);
+            Ok(!cancel.load(Ordering::Relaxed))
+        },
+        progress,
+    )
+    .map_err(|e| anyhow!(tr("Die Audiodatei konnte nicht gelesen werden.", "The audio file could not be read.") + " " + &e.to_string()))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(EngineError::Cancelled.into());
+    }
+    tracing::info!(
+        file = ?path.file_name(),
+        audio_seconds = samples.len() as f64 / MODEL_RATE as f64,
+        seconds = started.elapsed().as_secs_f64(),
+        "audio read"
+    );
+    Ok(samples)
 }

@@ -8,5 +8,9 @@ Windows 10 (2004 or later) or Windows 11, 64-bit. No administrator rights needed
 2. Click through the installer and **Finish**. Scripta starts.
 3. Click **Get Started**: Scripta downloads its speech models once (about 720 MB), then works offline.
 
+With a graphics card (AMD, NVIDIA or Intel), turn on **Settings → Transcription → Use graphics card**
+(German: Einstellungen → Transkription → Grafikkarte verwenden): several times faster, one more download of
+about 2.5 GB.
+
 Step-by-step guide with the German Windows labels and what to do if Smart App Control blocks it:
 [README](https://github.com/saibot-strg/scripta-windows#install-about-5-minutes).

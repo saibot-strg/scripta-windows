@@ -23,7 +23,8 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 60
+    # The first run builds sherpa-onnx with DirectML (cached afterwards).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
 
@@ -42,9 +43,24 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # The compiled sherpa-onnx-sys crate contains the DirectML libraries:
+      # a new build script means a new cache.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: sherpa-${{ hashFiles('scripts/build-sherpa-directml.ps1') }}
+
+      - name: Cache sherpa-onnx with DirectML
+        id: native
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/native/sherpa-onnx
+          key: sherpa-directml-${{ hashFiles('scripts/build-sherpa-directml.ps1') }}
+
+      - name: Build sherpa-onnx with DirectML
+        if: steps.native.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: scripts/build-sherpa-directml.ps1 -WorkDir "${{ runner.temp }}\scripta-build"
 
       - run: npm ci
 
@@ -77,8 +93,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
+        # Versions 0.x are published as pre-releases.
         run: |
+          $flags = @()
+          if ($env:VERSION.StartsWith('0.')) { $flags += '--prerelease' }
           gh release create "${{ github.ref_name }}" (Get-ChildItem out/*) `
             --title "Scripta for Windows $env:VERSION" `
             --notes-file .github/release-notes.md --generate-notes `
-            --verify-tag
+            --verify-tag @flags

@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 
 use scripta_lib::audio::{mf, MODEL_RATE};
 use scripta_lib::engine::{SpeakerEngine, SpeechEngine};
+use scripta_lib::gpu::Device;
 use scripta_lib::models::ModelKind;
 use scripta_lib::transcript::{self, SpeakerKey};
 use scripta_lib::voices::{LabelVoice, MatchState, VoiceStore, AUTOMATIC_THRESHOLD};
@@ -19,6 +20,11 @@ fn fixture(name: &str) -> PathBuf {
 
 fn samples(name: &str) -> Vec<f32> {
     mf::decode_to_vec(&fixture(name), MODEL_RATE, |_| {}).expect("decode fixture")
+}
+
+/// The processor, or a graphics card with SCRIPTA_GPU (see `Device::from_env`).
+fn device() -> Device {
+    Device::from_env()
 }
 
 fn models_installed() -> bool {
@@ -41,7 +47,7 @@ fn german_speech() {
     if !models_installed() {
         return;
     }
-    let engine = SpeechEngine::load().unwrap();
+    let engine = SpeechEngine::load(device()).unwrap();
     let audio = samples("speech-de.m4a");
     let words = engine.transcribe(&audio, &AtomicBool::new(false), |_| {}).unwrap();
     let text = text_of(&words);
@@ -60,7 +66,7 @@ fn english_speech() {
     if !models_installed() {
         return;
     }
-    let engine = SpeechEngine::load().unwrap();
+    let engine = SpeechEngine::load(device()).unwrap();
     let words = engine.transcribe(&samples("speech-en.m4a"), &AtomicBool::new(false), |_| {}).unwrap();
     let text = text_of(&words);
     println!("{text}");
@@ -75,7 +81,7 @@ fn two_alternating_voices_are_told_apart() {
     if !models_installed() {
         return;
     }
-    let engine = SpeakerEngine::load().unwrap();
+    let engine = SpeakerEngine::load(device()).unwrap();
     let diarization = engine.diarize(&samples("speakers-en.m4a"), None).unwrap();
     println!("{:?}", diarization.turns);
     assert_eq!(diarization.speakers(), [1, 2]);
@@ -96,7 +102,7 @@ fn a_fixed_number_of_speakers_is_respected() {
     if !models_installed() {
         return;
     }
-    let engine = SpeakerEngine::load().unwrap();
+    let engine = SpeakerEngine::load(device()).unwrap();
     let audio = samples("speakers-en.m4a");
     assert_eq!(engine.diarize(&audio, Some(1)).unwrap().speakers(), [1]);
     assert_eq!(engine.diarize(&audio, Some(3)).unwrap().speakers().len(), 3);
@@ -108,8 +114,8 @@ fn each_sentence_is_attributed_to_its_speaker() {
         return;
     }
     let audio = samples("speakers-en.m4a");
-    let diarization = SpeakerEngine::load().unwrap().diarize(&audio, None).unwrap();
-    let words = SpeechEngine::load().unwrap().transcribe(&audio, &AtomicBool::new(false), |_| {}).unwrap();
+    let diarization = SpeakerEngine::load(device()).unwrap().diarize(&audio, None).unwrap();
+    let words = SpeechEngine::load(device()).unwrap().transcribe(&audio, &AtomicBool::new(false), |_| {}).unwrap();
     let draft = transcript::transcript(&words, Some(&diarization));
     for segment in &draft.segments {
         println!("{:?}: {}", segment.speaker, segment.text());
@@ -120,7 +126,8 @@ fn each_sentence_is_attributed_to_its_speaker() {
     assert_eq!(speaker("finance"), Some(SpeakerKey::diarized(1)));
     assert_eq!(speaker("migration"), Some(SpeakerKey::diarized(2)));
     assert_eq!(speaker("friday"), Some(SpeakerKey::diarized(1)));
-    assert_eq!(speaker("fallback"), Some(SpeakerKey::diarized(2)));
+    // Not "fallback": onnxruntime 1.24 (the DirectML build) hears "fullback".
+    assert_eq!(speaker("delivery"), Some(SpeakerKey::diarized(2)));
 }
 
 #[test]
@@ -128,7 +135,7 @@ fn named_voices_are_suggested_again_over_a_call() {
     if !models_installed() {
         return;
     }
-    let engine = SpeakerEngine::load().unwrap();
+    let engine = SpeakerEngine::load(device()).unwrap();
     let first = engine.diarize(&samples("speakers-en.m4a"), None).unwrap();
     let second = engine.diarize(&samples("speakers-en-teams.m4a"), None).unwrap();
     let mut store = VoiceStore::open_in_memory().unwrap();
@@ -216,7 +223,7 @@ fn a_german_meeting_with_three_people_is_separated() {
     if !models_installed() {
         return;
     }
-    let engine = SpeakerEngine::load().unwrap();
+    let engine = SpeakerEngine::load(device()).unwrap();
     for (file, turns) in [("meeting-de.m4a", &MEETING_DE[..]), ("meeting-de-call.m4a", &MEETING_DE_CALL[..])] {
         let diarization = engine.diarize(&samples(file), None).unwrap();
         assert_eq!(diarization.speakers().len(), 3, "{file}: {:?}", diarization.turns);
@@ -230,8 +237,8 @@ fn german_meeting_words_go_to_the_right_people() {
         return;
     }
     let audio = samples("meeting-de.m4a");
-    let diarization = SpeakerEngine::load().unwrap().diarize(&audio, None).unwrap();
-    let words = SpeechEngine::load().unwrap().transcribe(&audio, &AtomicBool::new(false), |_| {}).unwrap();
+    let diarization = SpeakerEngine::load(device()).unwrap().diarize(&audio, None).unwrap();
+    let words = SpeechEngine::load(device()).unwrap().transcribe(&audio, &AtomicBool::new(false), |_| {}).unwrap();
     let draft = transcript::transcript(&words, Some(&diarization));
     for segment in &draft.segments {
         println!("{:?}: {}", segment.speaker.map(|s| s.number), segment.text());
@@ -258,7 +265,7 @@ fn named_colleagues_are_recognized_in_the_next_call() {
     if !models_installed() {
         return;
     }
-    let engine = SpeakerEngine::load().unwrap();
+    let engine = SpeakerEngine::load(device()).unwrap();
     let first = engine.diarize(&samples("meeting-de.m4a"), None).unwrap();
     let second = engine.diarize(&samples("meeting-de-call.m4a"), None).unwrap();
     let first_people = assert_consistent(&speakers_of_turns(&first, &MEETING_DE), &MEETING_DE);

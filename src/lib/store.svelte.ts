@@ -255,7 +255,10 @@ class AppStore {
     await listen<{ id: string | null }>('library-changed', (event) => this.scheduleReload(event.payload.id));
     await listen<ServiceSnapshot>('service-changed', (event) => this.applyService(event.payload));
     await listen<{ id: string; fraction: number }>('transcription-progress', (event) => {
-      this.progress = { [event.payload.id]: event.payload.fraction };
+      const { id, fraction } = event.payload;
+      // In place, so only the running recording's row and detail update.
+      if (id in this.progress) this.progress[id] = fraction;
+      else this.progress = { [id]: fraction };
     });
     await listen<RecorderStatus>('recorder-status', (event) => this.applyRecorder(event.payload));
     await listen<Notice>('notice', (event) => (this.notice = event.payload));

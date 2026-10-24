@@ -5,6 +5,7 @@ import type {
   Bootstrap,
   ExportFormat,
   Folder,
+  GraphicsCard,
   MeetingApp,
   Microphones,
   NameAssignment,
@@ -38,7 +39,8 @@ export const api = {
   serviceSnapshot: () => invoke<ServiceSnapshot>('service_snapshot'),
   prepareModel: (kind: 'speech' | 'speakers') => invoke<void>('prepare_model', { kind }),
   deleteModel: (kind: 'speech' | 'speakers') => invoke<void>('delete_model', { kind }),
-  modelSizes: () => invoke<{ speech: number | null; speakers: number | null }>('model_sizes'),
+  modelSizes: () => invoke<{ speech: number | null; speakers: number | null; speechDownload: number }>('model_sizes'),
+  graphicsCards: () => invoke<GraphicsCard[]>('graphics_cards'),
 
   editSegment: (id: string, text: string) => invoke<void>('edit_segment', { id, textValue: text }),
   restoreSegment: (id: string) => invoke<void>('restore_segment', { id }),

@@ -5,7 +5,8 @@ voice notes and meetings, transcribes them on-device, tells speakers apart and l
 builds **the same product for Windows**, for colleagues in an office. Same name, same behaviour, same rules.
 Scripta stays the Mac app; this project does not replace it.
 
-Read this document fully before writing code. Use the Scripta source as the reference for behaviour; this
+This document is the target behaviour and the rules; keep to it when changing code. What is built and why is
+in `STATUS.md`, what is open in `NEXT-STEPS.md`. Use the Scripta source as the reference for behaviour; this
 document says where to look.
 
 ## 1. Rules
@@ -39,8 +40,7 @@ document says where to look.
 | Dictation | Global hotkey, speak, text is pasted into the active app | `Scripta/Dictation/` |
 | Updates | Checks GitHub releases once a day, shows a note | `Scripta/Updates/` |
 
-Priority for Windows: recording + meetings, transcription, speaker separation and recognition, library, export.
-Dictation and the update check come later.
+Everything above is built except dictation (later, see `NEXT-STEPS.md`).
 
 ## 3. Speaker separation and recognition – the details that matter
 
@@ -108,73 +108,3 @@ This is the part that took the most iterations on the Mac. Copy the logic, not j
 - A "?" next to guessed names; click confirms.
 - Settings tab "Personen": opt-in toggle with a privacy note, list of people (confirmed samples, "wird vorgeschlagen"
   / "wird automatisch erkannt"), rename (renames them in all transcripts), delete, "Alle Stimmprofile löschen".
-
-## 5. Proposed architecture (decide after the spike)
-
-- **Stack:** Tauri 2 (Rust core, web UI). Windows only as a target; no need to support macOS.
-- **Speech:** sherpa-onnx (Rust/C API, offline, Windows x64/arm64):
-  - Parakeet TDT 0.6B v3 int8 ONNX (multilingual). Scripta uses "Parakeet Ultra" (a post-training of v3, CoreML);
-    check whether an ONNX export of Ultra exists, else use v3.
-  - Diarization: pyannote segmentation 3.0 + a speaker embedding model (WeSpeaker ResNet34 or 3D-Speaker CAM++) +
-    clustering. Expose per-speaker embeddings; matching runs on our side (section 3).
-- **Audio:** WASAPI. Microphone capture; system audio via process loopback
-  (`AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`, Windows 10 2004+ / Windows 11) for one app (e.g. Teams, include its
-  process tree) or the default device loopback for all system audio. Keep both tracks on one timeline (fill gaps
-  with silence), as Scripta's `AudioFileSink` does.
-- **Storage:** SQLite (e.g. rusqlite) in `%APPDATA%\Scripta`, versioned migrations from day one. Voice data in a
-  separate database file so it can be deleted completely.
-- **Performance:** expect office laptops without NPU/GPU acceleration. Measure early (section 7). Options if too
-  slow or hot: transcribe when plugged in, queue in the background, smaller models.
-
-### Spike first (1–2 days)
-Before building, evaluate forking **Meetily** (github.com/Zackriya-Solutions/meetily, MIT, Tauri + Rust +
-Next.js, Windows + macOS, Parakeet via ONNX, microphone + system audio). Answer:
-1. Does it build on the Windows test PC? How long, which dependencies?
-2. Does it capture Teams audio and the microphone cleanly?
-3. Real-time factor of Parakeet on the test PC, CPU load, heat, memory for a 60-minute file.
-4. Code quality: can our speaker logic and library fit in cleanly?
-Recommend fork or own Tauri app with numbers. Keep Meetily's MIT notice if forking.
-
-## 6. Development loop (owner's setup)
-
-- The agent works on the Mac in a workspace with `OwnTranscriber` (read-only) and `scripta-windows`.
-- **Fast loop via Tailscale:** the Windows test PC runs the Windows OpenSSH server and is reachable in the owner's
-  Tailscale network. Push to the private repo, then build on the PC over SSH, e.g.
-  `ssh <pc> "cd C:\dev\scripta-windows; git pull; cargo tauri build"` (shell: PowerShell). Read the errors, fix,
-  repeat. Ask the owner for the host name, user and path; never store credentials in the repo.
-- GUI and audio cannot be tested over SSH (other session). The owner starts the app on the PC and reports back.
-  Make that easy: log to a file in `%APPDATA%\Scripta\logs`, and say exactly what to try.
-- **Releases via GitHub Actions** only when a version works: a tag `v*` builds the installer on `windows-latest`
-  and attaches it to a GitHub release (like Scripta's `.github/workflows/release.yml`). A manual run builds a test
-  artifact only. Unsigned at first (SmartScreen warns – document "More info → Run anyway"); code signing or Intune
-  distribution later.
-
-### Windows test PC checklist (for the owner)
-Tailscale; OpenSSH Server (Settings → Optional features) with key login; Git; Rust (rustup, MSVC toolchain);
-Visual Studio 2022 Build Tools with "Desktop development with C++"; Node.js LTS; WebView2 (built into Windows 11).
-The spike may add CMake/LLVM or others – list them in the README.
-
-## 7. Milestones (each ends with a gate)
-
-| # | Milestone | Done when |
-|---|-----------|-----------|
-| W0 | Spike and decision | Numbers from section 5 on the test PC, recommendation, owner decides |
-| W1 | Skeleton | App starts on the PC; library database with migrations; settings; logs; release workflow builds an installer |
-| W2 | Recording | Microphone and meeting recording (Teams via process loopback), two aligned tracks + mix, crash-safe |
-| W3 | Transcription | Parakeet offline, model download with progress, segments, playback with highlight, search |
-| W4 | Speakers | Diarization, numbered speakers, microphone rule, assignment dialog, per-bubble reassignment, recount |
-| W5 | Recognition | Voice store, matching, guesses, learning rules and all lessons from section 3, People settings |
-| W6 | Library and export | Folders, filters, swipe/delete, TXT/MD/SRT/VTT/JSON |
-| W7 | Office readiness | Performance on a weak laptop, installer, onboarding text with expectations and privacy notes |
-
-Tests: unit tests for word assignment, segmenting, microphone rule, matching thresholds, learning rules and the
-lessons in section 3 (Scripta's `ScriptaTests/` has the cases: `TranscriptionTests.swift`,
-`VoiceRecognitionTests.swift`). End-to-end tests with synthetic TTS dialogues (two clearly different voices).
-
-## 8. Before office rollout (not code, but blocking)
-
-Voice profiles used to identify people are biometric data (Art. 9 GDPR). Before colleagues use recognition:
-data protection officer, works council (co-determination for systems suited to monitor employees), a data
-protection impact assessment, and consent of everyone recorded (recording without consent is illegal in Germany).
-The app must make this easy: recognition opt-in, a clear note, delete per person and all at once, nothing leaves
-the PC.

@@ -312,8 +312,28 @@ pub fn numbered(segments: Vec<SegmentDraft>, voices: &HashMap<SpeakerKey, Vec<f3
 pub const MINIMUM_SPEAKER_SPEECH: f64 = 4.0;
 /// Two speakers whose voices are this similar are one person split by the
 /// clustering (TitaNet: same person 0.8 and more even over a call, different
-/// people at most 0.6 in the test material).
+/// people at most 0.7 in the test material).
 pub const SAME_VOICE_SIMILARITY: f32 = 0.8;
+
+/// With more parts than this the clustering has split the voices into
+/// fragments. Over a real call sherpa-onnx's complete linkage does that: 30
+/// parts in 5 minutes of a Teams meeting, 517 in its 2 hours (276 for the one
+/// person on the microphone track), against 2 or 3 in the test dialogues.
+pub const FRAGMENTED_PARTS: usize = 8;
+/// Fragments: those with less than 2 % of all speech (at least 4 s, at most
+/// 30 s) join the most similar speaker. In the real meeting the pieces left
+/// above 15 s were spread over the whole meeting, while two guests who spoke
+/// about 34 s each, only in minutes 10 to 16, sounded like nobody else.
+pub const FRAGMENT_SHARE: f64 = 0.02;
+pub const FRAGMENT_LIMIT: f64 = 30.0;
+/// Fragments whose voices are at least this alike (average linkage) are one
+/// person. A fragment's voice comes from a few seconds of audio and is much
+/// less certain than a whole speaker's (the same person: 0.46 at 1–2 s, 0.75
+/// at 16–40 s), so the limit is lower: in the real meeting the fragments of
+/// one person were at least 0.45 alike (microphone track: one speaker left),
+/// three different people 0.40 to 0.44 (system track: those three plus the
+/// two guests left).
+pub const FRAGMENT_SAME_VOICE: f32 = 0.45;
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
@@ -328,61 +348,121 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// the speakers by first appearance again. Voices of merged speakers are
 /// averaged by speech time.
 pub fn consolidate(diarization: Diarization) -> Diarization {
+    if diarization.speakers().len() <= FRAGMENTED_PARTS {
+        return consolidate_with(diarization, MINIMUM_SPEAKER_SPEECH, SAME_VOICE_SIMILARITY);
+    }
+    let speech: f64 = diarization.turns.iter().map(|t| t.end - t.start).sum();
+    let minimum = (speech * FRAGMENT_SHARE).clamp(MINIMUM_SPEAKER_SPEECH, FRAGMENT_LIMIT);
+    consolidate_with(diarization, minimum, FRAGMENT_SAME_VOICE)
+}
+
+/// Exactly `count` speakers (when the user corrects the number): fragments
+/// join the most similar speaker, then the most alike speakers are merged
+/// until `count` are left.
+pub fn consolidate_to(diarization: Diarization, count: usize) -> Diarization {
+    let speech: f64 = diarization.turns.iter().map(|t| t.end - t.start).sum();
+    let minimum = (speech * FRAGMENT_SHARE).clamp(MINIMUM_SPEAKER_SPEECH, FRAGMENT_LIMIT);
+    merge_speakers(diarization, minimum, f32::NEG_INFINITY, count.max(1))
+}
+
+/// `consolidate` with other limits (calibration).
+pub fn consolidate_with(diarization: Diarization, minimum_speech: f64, same_voice: f32) -> Diarization {
+    merge_speakers(diarization, minimum_speech, same_voice, 1)
+}
+
+/// Merges fragments and voices at least `same_voice` alike, keeping at least
+/// `keep` speakers.
+fn merge_speakers(diarization: Diarization, minimum_speech: f64, same_voice: f32, keep: usize) -> Diarization {
     let Diarization { mut turns, mut embeddings } = diarization;
-    let speech = |turns: &[SpeakerTurn], speaker: i64| -> f64 {
-        turns.iter().filter(|t| t.speaker == speaker).map(|t| t.end - t.start).sum()
-    };
+    let speakers: Vec<i64> = turns.iter().map(|t| t.speaker).collect::<BTreeSet<_>>().into_iter().collect();
+    let count = speakers.len();
+    let mut speech: Vec<f64> =
+        speakers.iter().map(|s| turns.iter().filter(|t| t.speaker == *s).map(|t| t.end - t.start).sum()).collect();
+    // Speech of the members with a voice: the weights of their similarities.
+    let mut weight: Vec<f64> =
+        speakers.iter().zip(&speech).map(|(s, w)| if embeddings.contains_key(s) { *w } else { 0.0 }).collect();
+    // Similarity of two groups: the mean over their members, weighted by
+    // speech (average linkage). Unlike a mean voice, a merge never makes a
+    // group sound more like a third one, so fragments holding two people
+    // can't chain them together (seen in a real Teams meeting).
+    let mut similarity: Vec<Vec<Option<f32>>> = speakers
+        .iter()
+        .map(|a| {
+            speakers
+                .iter()
+                .map(|b| match (embeddings.get(a), embeddings.get(b)) {
+                    (Some(x), Some(y)) => Some(cosine(x, y)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    let mut alive = vec![true; count];
     loop {
-        let speakers: Vec<i64> = turns.iter().map(|t| t.speaker).collect::<BTreeSet<_>>().into_iter().collect();
-        if speakers.len() < 2 {
+        let living: Vec<usize> = (0..count).filter(|i| alive[*i]).collect();
+        if living.len() <= keep {
             break;
         }
         // The pair to merge: a fragment into its most similar speaker, else
         // the two most similar voices if they are one person.
-        let smallest = *speakers.iter().min_by(|a, b| speech(&turns, **a).total_cmp(&speech(&turns, **b))).unwrap();
-        let similarity = |a: i64, b: i64| match (embeddings.get(&a), embeddings.get(&b)) {
-            (Some(x), Some(y)) => cosine(x, y),
-            _ => -1.0,
-        };
-        let merge = if speech(&turns, smallest) < MINIMUM_SPEAKER_SPEECH {
-            let target = speakers
+        let smallest = *living.iter().min_by(|a, b| speech[**a].total_cmp(&speech[**b])).unwrap();
+        let merge = if speech[smallest] < minimum_speech {
+            let known = |other: usize| similarity[smallest][other].unwrap_or(f32::NEG_INFINITY);
+            living
                 .iter()
-                .filter(|s| **s != smallest)
-                .max_by(|a, b| {
-                    similarity(smallest, **a)
-                        .total_cmp(&similarity(smallest, **b))
-                        .then(speech(&turns, **a).total_cmp(&speech(&turns, **b)))
-                })
-                .copied();
-            target.map(|target| (smallest, target))
+                .filter(|i| **i != smallest)
+                .max_by(|a, b| known(**a).total_cmp(&known(**b)).then(speech[**a].total_cmp(&speech[**b])))
+                .map(|target| (smallest, *target))
         } else {
-            let mut best: Option<(i64, i64, f32)> = None;
-            for (i, a) in speakers.iter().enumerate() {
-                for b in &speakers[i + 1..] {
-                    let value = similarity(*a, *b);
-                    if value >= SAME_VOICE_SIMILARITY && best.is_none_or(|(_, _, v)| value > v) {
-                        best = Some((*a, *b, value));
+            let mut best: Option<(usize, usize, f32)> = None;
+            for (n, a) in living.iter().enumerate() {
+                for b in &living[n + 1..] {
+                    if let Some(value) = similarity[*a][*b] {
+                        if value >= same_voice && best.is_none_or(|(_, _, v)| value > v) {
+                            best = Some((*a, *b, value));
+                        }
                     }
                 }
             }
             // Keep the speaker with more speech.
-            best.map(|(a, b, _)| if speech(&turns, a) < speech(&turns, b) { (a, b) } else { (b, a) })
+            best.map(|(a, b, _)| if speech[a] < speech[b] { (a, b) } else { (b, a) })
         };
         let Some((from, into)) = merge else { break };
-        let (from_speech, into_speech) = (speech(&turns, from), speech(&turns, into));
-        if let (Some(a), Some(b)) = (embeddings.remove(&from), embeddings.get(&into).cloned()) {
-            let total = (from_speech + into_speech).max(1e-6);
-            let mixed: Vec<f32> = a
-                .iter()
-                .zip(&b)
-                .map(|(x, y)| (*x as f64 * from_speech / total + *y as f64 * into_speech / total) as f32)
-                .collect();
-            let norm = mixed.iter().map(|x| x * x).sum::<f32>().sqrt();
-            embeddings.insert(into, if norm > 0.0 { mixed.iter().map(|x| x / norm).collect() } else { mixed });
+        for other in living.iter().copied().filter(|k| *k != from && *k != into) {
+            let merged = match (similarity[from][other], similarity[into][other]) {
+                (Some(x), Some(y)) => {
+                    let total = (weight[from] + weight[into]).max(1e-9);
+                    Some(((weight[from] * x as f64 + weight[into] * y as f64) / total) as f32)
+                }
+                (x, y) => x.or(y),
+            };
+            similarity[into][other] = merged;
+            similarity[other][into] = merged;
         }
+        // The voice of the group: the members' voices averaged by speech.
+        let (from_id, into_id) = (speakers[from], speakers[into]);
+        match (embeddings.remove(&from_id), embeddings.get(&into_id).cloned()) {
+            (Some(a), Some(b)) => {
+                let total = (weight[from] + weight[into]).max(1e-9);
+                let mixed: Vec<f32> = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| ((*x as f64 * weight[from] + *y as f64 * weight[into]) / total) as f32)
+                    .collect();
+                let norm = mixed.iter().map(|x| x * x).sum::<f32>().sqrt();
+                embeddings.insert(into_id, if norm > 0.0 { mixed.iter().map(|x| x / norm).collect() } else { mixed });
+            }
+            (Some(a), None) => {
+                embeddings.insert(into_id, a);
+            }
+            _ => {}
+        }
+        speech[into] += speech[from];
+        weight[into] += weight[from];
+        alive[from] = false;
         for turn in &mut turns {
-            if turn.speaker == from {
-                turn.speaker = into;
+            if turn.speaker == from_id {
+                turn.speaker = into_id;
             }
         }
     }
@@ -689,6 +769,58 @@ mod tests {
         assert_eq!(result.speakers(), [1, 2]);
         assert_eq!(result.turns.iter().map(|t| t.speaker).collect::<Vec<_>>(), [1, 1, 2, 1, 1]);
         assert_eq!(result.embeddings.len(), 2);
+    }
+
+    #[test]
+    fn fragments_of_two_people_become_two_speakers() {
+        // Ten parts each, as the clustering leaves a call: parts of one person
+        // 0.6 alike, of different people 0.42.
+        let part = |person: [f32; 2], n: usize| {
+            let mut voice = vec![0.0f32; 22];
+            voice[0] = person[0] * 0.6f32.sqrt();
+            voice[1] = person[1] * 0.6f32.sqrt();
+            voice[2 + n] = 0.4f32.sqrt();
+            voice
+        };
+        let (a, b) = ([1.0, 0.0], [0.7, 0.51f32.sqrt()]);
+        let mut turns = Vec::new();
+        let mut embeddings = HashMap::new();
+        for n in 0..20 {
+            let speaker = n as i64 + 1;
+            turns.push(turn(speaker, n as f64 * 11.0, n as f64 * 11.0 + 10.0));
+            embeddings.insert(speaker, part(if n % 2 == 0 { a } else { b }, n));
+        }
+        let result = consolidate(Diarization { turns, embeddings });
+        assert_eq!(result.speakers(), [1, 2]);
+        assert_eq!(result.turns.iter().map(|t| t.speaker).collect::<Vec<_>>(), (0..20).map(|n| n % 2 + 1).collect::<Vec<i64>>());
+    }
+
+    #[test]
+    fn a_wanted_number_of_speakers_is_reached() {
+        let voice = |degrees: f32| vec![degrees.to_radians().cos(), degrees.to_radians().sin()];
+        let mut embeddings = HashMap::new();
+        for (speaker, degrees) in [(1, 0.0), (2, 10.0), (3, 80.0), (4, 90.0)] {
+            embeddings.insert(speaker, voice(degrees));
+        }
+        let turns = vec![turn(1, 0.0, 20.0), turn(2, 21.0, 41.0), turn(3, 42.0, 62.0), turn(4, 63.0, 83.0)];
+        let d = Diarization { turns, embeddings };
+        let two = consolidate_to(d.clone(), 2);
+        assert_eq!(two.turns.iter().map(|t| t.speaker).collect::<Vec<_>>(), [1, 1, 2, 2]);
+        assert_eq!(consolidate_to(d.clone(), 1).speakers(), [1]);
+        assert_eq!(consolidate_to(d, 6).speakers(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_voice_between_two_people_does_not_join_them() {
+        let degrees = |d: f32| vec![d.to_radians().cos(), d.to_radians().sin()];
+        let mut embeddings = HashMap::new();
+        embeddings.insert(1, degrees(0.0));
+        embeddings.insert(2, degrees(72.5)); // cos 0.3: another person
+        embeddings.insert(3, degrees(26.0)); // cos 0.9 to 1, 0.69 to 2
+        let d = Diarization { turns: vec![turn(1, 0.0, 60.0), turn(2, 61.0, 111.0), turn(3, 112.0, 132.0)], embeddings };
+        let result = consolidate_with(d, 4.0, 0.6);
+        assert_eq!(result.speakers(), [1, 2]);
+        assert_eq!(result.turns.iter().map(|t| t.speaker).collect::<Vec<_>>(), [1, 2, 1]);
     }
 
     #[test]
