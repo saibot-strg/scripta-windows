@@ -93,11 +93,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        # Versions 0.x are published as pre-releases.
+        # Not a pre-release: the app's update check asks for the latest
+        # release, and GitHub leaves pre-releases out of it.
         run: |
-          $flags = @()
-          if ($env:VERSION.StartsWith('0.')) { $flags += '--prerelease' }
           gh release create "${{ github.ref_name }}" (Get-ChildItem out/*) `
             --title "Scripta for Windows $env:VERSION" `
             --notes-file .github/release-notes.md --generate-notes `
-            --verify-tag @flags
+            --verify-tag
